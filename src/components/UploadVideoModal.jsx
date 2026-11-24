@@ -12,6 +12,7 @@ import {
   MapPin,
   Tag
 } from 'lucide-react';
+import { uploadFileToS3 } from '../utils/s3Upload';
 
 export default function UploadVideoModal({ isOpen, onClose, presentDistrict, onVideoUploaded }) {
   if (!isOpen) return null;
@@ -74,7 +75,7 @@ export default function UploadVideoModal({ isOpen, onClose, presentDistrict, onV
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!videoFile) {
       setErrorMessage('Please choose or drag & drop a video file first.');
@@ -89,37 +90,36 @@ export default function UploadVideoModal({ isOpen, onClose, presentDistrict, onV
     setIsUploading(true);
     setUploadProgress(15);
 
-    // Simulate upload progress
-    const interval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 95) {
-          clearInterval(interval);
-          setTimeout(() => {
-            setIsUploading(false);
-            setIsSuccess(true);
-            if (onVideoUploaded) {
-              onVideoUploaded({
-                id: `user-video-${Date.now()}`,
-                title: title.trim(),
-                topic: topic,
-                description: description.trim() || 'Community perspective shared on Now 9 Common Talks.',
-                author: isAnonymous ? 'Anonymous Citizen' : (userName.trim() || 'Community Voice'),
-                district: presentDistrict?.districtName || 'Hyderabad',
-                state: presentDistrict?.stateName || 'Telangana',
-                videoUrl: videoPreviewUrl,
-                createdAt: 'Just now',
-                likes: 1,
-                views: '1',
-                isUserUpload: true,
-                duration: 'User Upload'
-              });
-            }
-          }, 400);
-          return 100;
-        }
-        return prev + 20;
+    try {
+      // Direct upload to AWS S3
+      const s3Url = await uploadFileToS3(videoFile, 'common-talks', (pct) => {
+        setUploadProgress(pct);
       });
-    }, 200);
+
+      setIsUploading(false);
+      setIsSuccess(true);
+      if (onVideoUploaded) {
+        onVideoUploaded({
+          id: `user-video-${Date.now()}`,
+          title: title.trim(),
+          topic: topic,
+          description: description.trim() || 'Community perspective shared on Now 9 Common Talks.',
+          author: isAnonymous ? 'Anonymous Citizen' : (userName.trim() || 'Community Voice'),
+          district: presentDistrict?.districtName || 'Hyderabad',
+          state: presentDistrict?.stateName || 'Telangana',
+          videoUrl: s3Url || videoPreviewUrl,
+          createdAt: 'Just now',
+          likes: 1,
+          views: '1',
+          isUserUpload: true,
+          duration: 'User Upload'
+        });
+      }
+    } catch (err) {
+      console.error('S3 Upload Error:', err);
+      setIsUploading(false);
+      setErrorMessage('Failed to upload video to S3. Please try again.');
+    }
   };
 
   const handleReset = () => {

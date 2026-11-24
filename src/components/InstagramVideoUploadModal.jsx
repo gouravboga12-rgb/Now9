@@ -19,6 +19,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { uploadCommonTalksVideo } from '../data/commonTalksStore';
+import { uploadFileToS3 } from '../utils/s3Upload';
 
 export default function InstagramVideoUploadModal({ 
   isOpen, 
@@ -91,7 +92,7 @@ export default function InstagramVideoUploadModal({
     setCaption(prev => prev + emoji);
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     if (e) e.preventDefault();
     if (!videoPreviewUrl && !videoFile) {
       setErrorMessage('Please choose or record a video first.');
@@ -106,37 +107,38 @@ export default function InstagramVideoUploadModal({
     setIsUploading(true);
     setUploadProgress(20);
 
-    // Instagram-style fast progress
-    const interval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 95) {
-          clearInterval(interval);
-          setTimeout(() => {
-            const matchedCat = categories.find(c => c.label === category) || categories[0];
-            const newVideo = uploadCommonTalksVideo({
-              title: caption.trim().split('\n')[0].slice(0, 70),
-              caption: caption.trim(),
-              author: isAnonymous ? 'Anonymous Citizen' : (authorName.trim() || 'Citizen Voice'),
-              authorHandle: isAnonymous ? '@anonymous_citizen' : `@${(authorName || 'citizen').toLowerCase().replace(/\s+/g, '_')}`,
-              role: matchedCat.value,
-              category: matchedCat.value,
-              topic: category,
-              location: customLocation,
-              district: currentLocation?.district || 'Hyderabad',
-              videoUrl: videoPreviewUrl || 'https://assets.mixkit.co/videos/preview/mixkit-news-anchor-talking-on-a-studio-set-41315-large.mp4',
-              thumbnail: '/assets/news_debate_studio.jpg',
-              duration: '0:45'
-            });
+    try {
+      let finalVideoUrl = videoPreviewUrl;
+      if (videoFile) {
+        finalVideoUrl = await uploadFileToS3(videoFile, 'reels', (pct) => {
+          setUploadProgress(pct);
+        });
+      }
 
-            setIsUploading(false);
-            if (onVideoUploaded) onVideoUploaded(newVideo);
-            onClose();
-          }, 400);
-          return 100;
-        }
-        return prev + 25;
+      const matchedCat = categories.find(c => c.label === category) || categories[0];
+      const newVideo = uploadCommonTalksVideo({
+        title: caption.trim().split('\n')[0].slice(0, 70),
+        caption: caption.trim(),
+        author: isAnonymous ? 'Anonymous Citizen' : (authorName.trim() || 'Citizen Voice'),
+        authorHandle: isAnonymous ? '@anonymous_citizen' : `@${(authorName || 'citizen').toLowerCase().replace(/\s+/g, '_')}`,
+        role: matchedCat.value,
+        category: matchedCat.value,
+        topic: category,
+        location: customLocation,
+        district: currentLocation?.district || 'Hyderabad',
+        videoUrl: finalVideoUrl || videoPreviewUrl || 'https://assets.mixkit.co/videos/preview/mixkit-news-anchor-talking-on-a-studio-set-41315-large.mp4',
+        thumbnail: '/assets/news_debate_studio.jpg',
+        duration: '0:45'
       });
-    }, 180);
+
+      setIsUploading(false);
+      if (onVideoUploaded) onVideoUploaded(newVideo);
+      onClose();
+    } catch (err) {
+      console.error('S3 Upload Error:', err);
+      setIsUploading(false);
+      setErrorMessage('Failed to upload video to S3. Please try again.');
+    }
   };
 
   return (

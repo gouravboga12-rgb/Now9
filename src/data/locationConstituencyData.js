@@ -1,4 +1,5 @@
 // Advanced Automatic Geolocation, Address Resolution, and Constituency Database for NowNine
+import { reverseGeocodeMapbox, getMapboxStaticMapUrl } from '../utils/mapboxService';
 
 // ALL MAJOR POLITICAL PARTIES FOR TELANGANA (తెలంగాణ సమగ్ర పార్టీల జాబితా)
 export function getTelanganaAllParties(assembly = 'Telangana Assembly', locality = 'Local Area', overrides = {}) {
@@ -784,10 +785,35 @@ export function resolveConstituencyAndParties(detectedInfo) {
   };
 }
 
-// Live GPS Reverse Geocoder (Uses Nominatim + BigDataCloud fallback)
+// Live GPS Reverse Geocoder (Primary: Mapbox Geocoding, Secondary: Nominatim, Tertiary: BigDataCloud)
 export async function fetchLiveUserAddress(lat, lon) {
+  // 1. Primary: Enterprise Mapbox Reverse Geocoding (Fast, Pinpoint Precision)
   try {
-    // 1. Primary: OpenStreetMap Nominatim
+    const mapboxResult = await reverseGeocodeMapbox(lat, lon);
+    if (mapboxResult) {
+      const mapSnippetUrl = getMapboxStaticMapUrl(lat, lon, { zoom: 13, width: 400, height: 200 });
+      const resolved = resolveConstituencyAndParties({
+        locality: mapboxResult.locality,
+        city: mapboxResult.city,
+        district: mapboxResult.district,
+        state: mapboxResult.state,
+        pincode: mapboxResult.pincode,
+        exactAddress: mapboxResult.formattedAddress,
+        lat,
+        lon,
+        method: 'Mapbox High-Precision GPS 🛰️'
+      });
+      return {
+        ...resolved,
+        mapSnippetUrl
+      };
+    }
+  } catch (err) {
+    console.warn('[Mapbox] Reverse geocode error, trying OSM fallback...', err);
+  }
+
+  try {
+    // 2. Secondary fallback: OpenStreetMap Nominatim
     const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`;
     const res = await fetch(nominatimUrl, {
       headers: { 'Accept': 'application/json' }

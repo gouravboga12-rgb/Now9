@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { statesData } from '../data/regionalData';
 import { findNearestDistrict } from '../utils/districtCoordinates';
+import { reverseGeocodeMapbox, getMapboxStaticMapUrl } from '../utils/mapboxService';
 
 export default function LocationPoliticalTracker({ onTakeFullSurvey, onDistrictDetected }) {
   // Current active state: 'telangana' or 'andhraPradesh'
@@ -69,19 +70,26 @@ export default function LocationPoliticalTracker({ onTakeFullSurvey, onDistrictD
           // Calculate nearest exact district mathematically in TG / AP
           const match = findNearestDistrict(lat, lon);
 
-          // Try reverse geocode for exact locality name
+          // Try Mapbox high-precision reverse geocode for exact locality and district name
           let localityName = match.districtName;
+          let mapboxMapUrl = getMapboxStaticMapUrl(lat, lon, { zoom: 13, width: 400, height: 200 });
           try {
-            const res = await fetch(
-              `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`
-            );
-            if (res.ok) {
-              const data = await res.json();
-              const foundDistrict = data.localityInfo?.administrative?.find(a => 
-                a.description?.toLowerCase().includes("district") || a.adminLevel === 6
+            const mb = await reverseGeocodeMapbox(lat, lon);
+            if (mb) {
+              if (mb.district) localityName = mb.district;
+              else if (mb.city) localityName = mb.city;
+            } else {
+              const res = await fetch(
+                `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`
               );
-              if (foundDistrict && foundDistrict.name) {
-                localityName = foundDistrict.name.replace(/district/gi, "").trim();
+              if (res.ok) {
+                const data = await res.json();
+                const foundDistrict = data.localityInfo?.administrative?.find(a => 
+                  a.description?.toLowerCase().includes("district") || a.adminLevel === 6
+                );
+                if (foundDistrict && foundDistrict.name) {
+                  localityName = foundDistrict.name.replace(/district/gi, "").trim();
+                }
               }
             }
           } catch (e) {
@@ -94,12 +102,13 @@ export default function LocationPoliticalTracker({ onTakeFullSurvey, onDistrictD
 
           const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           const newLoc = {
-            districtName: match.districtName,
+            districtName: localityName || match.districtName,
             stateName: match.stateName,
             coordinates: `${lat.toFixed(4)}° N, ${lon.toFixed(4)}° E`,
-            accuracy: `High Precision GPS (±${accuracy}m)`,
-            method: "Verified Device GPS Fix",
-            timestamp: timeStr
+            accuracy: `Mapbox GPS Precision (±${accuracy}m)`,
+            method: "Verified Mapbox GPS Fix",
+            timestamp: timeStr,
+            mapSnippetUrl: mapboxMapUrl
           };
 
           setDetectedLocationData(newLoc);
