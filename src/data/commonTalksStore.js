@@ -1,6 +1,5 @@
 // Common Talks Video Store - Instagram-style Citizen Video Opinions
-// Supports Local Video Uploads, Real-Time Cross-Device Sync, Likes & Comments
-
+// Supports S3 Video Uploads, Real-Time Cross-Device Sync, Likes & Comments
 import { publishCloudEvent, subscribeCloudEvents } from './cloudSyncService';
 import { recordCustomerActivity } from './customerActivityStore';
 
@@ -163,6 +162,23 @@ export function uploadCommonTalksVideo(videoData) {
       badgeColor: 'rose',
       badgeText: 'Common Talks Video'
     });
+
+    // Persist video record to PostgreSQL
+    apiClient.post('/videos', {
+      title: newPost.title,
+      caption: newPost.caption,
+      s3_url: newPost.videoUrl,
+      thumbnail_url: newPost.thumbnail,
+      author_name: newPost.author,
+      author_handle: newPost.authorHandle,
+      category: newPost.category,
+      district: newPost.district,
+      state: 'Telangana',
+      duration: newPost.duration,
+      role: newPost.role,
+      topic: newPost.topic,
+      location: newPost.location
+    }).catch(err => console.warn('[CommonTalksStore] Server video sync failed:', err.message));
   } catch (e) {
     console.warn('Error saving Common Talks video:', e);
   }
@@ -188,6 +204,10 @@ export function likeCommonTalksVideo(videoId) {
   try {
     localStorage.setItem(COMMON_TALKS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(COMMON_TALKS_CHANGED_EVENT, { detail: { type: 'liked', videoId } }));
+    const numericId = String(videoId).replace(/^ct-db-/, '');
+    if (/^\d+$/.test(numericId)) {
+      apiClient.post(`/videos/${numericId}/like`, {}).catch(() => {});
+    }
   } catch (e) {}
 }
 
@@ -213,6 +233,13 @@ export function addCommentToCommonTalksVideo(videoId, commentText, authorName = 
   try {
     localStorage.setItem(COMMON_TALKS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(COMMON_TALKS_CHANGED_EVENT, { detail: { type: 'commented', videoId } }));
+    const numericId = String(videoId).replace(/^ct-db-/, '');
+    if (/^\d+$/.test(numericId)) {
+      apiClient.post(`/videos/${numericId}/comments`, {
+        author_name: authorName,
+        comment_text: commentText.trim()
+      }).catch(() => {});
+    }
   } catch (e) {}
 }
 
@@ -225,7 +252,51 @@ export function deleteCommonTalksVideo(videoId) {
     localStorage.setItem(COMMON_TALKS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(COMMON_TALKS_CHANGED_EVENT, { detail: { type: 'deleted', videoId } }));
     publishCloudEvent('DELETE_COMMON_TALKS_VIDEO', { videoId });
+    const numericId = String(videoId).replace(/^ct-db-/, '');
+    if (/^\d+$/.test(numericId)) {
+      apiClient.del(`/videos/${numericId}`).catch(() => {});
+    }
   } catch (e) {}
+}
+
+export async function syncCommonTalksFromServer() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await apiClient.get('/videos');
+    if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
+      const serverVideos = res.data.map(v => ({
+        id: `ct-db-${v.id}`,
+        dbId: v.id,
+        title: v.title,
+        caption: v.caption || v.title,
+        author: v.author_name || 'Citizen Voice',
+        authorHandle: v.author_handle || '@citizen',
+        role: v.role || 'Citizen',
+        category: v.category || 'General',
+        topic: v.topic || '💬 Public Opinion',
+        location: v.location || v.district || 'Telangana',
+        district: v.district || 'Hyderabad',
+        time: v.created_at ? new Date(v.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Recently',
+        duration: v.duration || '0:45',
+        likes: v.likes || 1,
+        views: `${v.views || 1} views`,
+        videoUrl: v.s3_url,
+        thumbnail: v.thumbnail_url || '/assets/news_debate_studio.jpg',
+        avatarBg: 'bg-gradient-to-tr from-amber-500 to-rose-500',
+        isUserUpload: v.is_user_upload !== false,
+        comments: []
+      }));
+      // Merge with initial videos
+      const current = getCommonTalksVideos();
+      const merged = [...serverVideos, ...current.filter(c => !serverVideos.some(s => s.videoUrl === c.videoUrl))];
+      localStorage.setItem(COMMON_TALKS_STORAGE_KEY, JSON.stringify(merged));
+      window.dispatchEvent(new CustomEvent(COMMON_TALKS_CHANGED_EVENT, { detail: { type: 'synced', list: merged } }));
+      return merged;
+    }
+  } catch (e) {
+    console.warn('[CommonTalksStore] Server sync failed:', e.message);
+  }
+  return null;
 }
 
 export function subscribeCommonTalksVideos(callback) {
@@ -237,6 +308,9 @@ export function subscribeCommonTalksVideos(callback) {
 
   window.addEventListener(COMMON_TALKS_CHANGED_EVENT, handler);
   window.addEventListener('storage', handler);
+
+  // Background sync from PostgreSQL
+  syncCommonTalksFromServer();
 
   const unsubCloud = subscribeCloudEvents((data) => {
     if (data.type === 'NEW_COMMON_TALKS_VIDEO' && data.payload?.video) {

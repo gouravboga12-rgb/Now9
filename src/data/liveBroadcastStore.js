@@ -1,6 +1,7 @@
 // Central Store for Now9 Live Broadcast & Recorded Sessions
-// Connects Admin Studio <-> Citizen Website in real-time
+// Connects Admin Studio <-> EC2 PostgreSQL Backend <-> Citizen Website in real-time
 import { publishCloudEvent, subscribeCloudEvents } from './cloudSyncService';
+import { apiClient } from '../api/apiClient';
 
 export const NOW9_ACTIVE_BROADCAST_KEY = 'now9_active_broadcast_v2';
 export const NOW9_RECORDED_BROADCASTS_KEY = 'now9_recorded_broadcasts_v2';
@@ -120,6 +121,26 @@ export function startLiveBroadcast({ title, host = 'Now9 Prime Editor', constitu
     }));
     // Broadcast instantly to all mobile devices and citizen browsers worldwide
     publishCloudEvent('LIVE_BROADCAST_CHANGED', { activeBroadcast: activeData });
+
+    // Persist to EC2 PostgreSQL backend
+    apiClient.post('/live/start', {
+      title: activeData.title,
+      subtitle: activeData.subtitle,
+      host: activeData.host,
+      constituency: activeData.constituency,
+      stream_url: activeData.videoUrl,
+      thumbnail_url: activeData.thumbnail,
+      active_viewers: activeData.viewers
+    }).then((res) => {
+      if (res?.activeBroadcast) {
+        localStorage.setItem(NOW9_ACTIVE_BROADCAST_KEY, JSON.stringify(res.activeBroadcast));
+        window.dispatchEvent(new CustomEvent(BROADCAST_EVENT, {
+          detail: { type: 'started', activeBroadcast: res.activeBroadcast }
+        }));
+      }
+    }).catch((err) => {
+      console.warn('[LiveBroadcast] Backend start sync failed, using local fallback:', err.message);
+    });
   } catch (e) {}
 
   return activeData;
@@ -167,6 +188,13 @@ export function endLiveBroadcast() {
     }));
     // Notify all phones that live ended
     publishCloudEvent('LIVE_BROADCAST_CHANGED', { activeBroadcast: inactive, newRecorded });
+
+    // Persist stop & archive recording in EC2 PostgreSQL
+    apiClient.post('/live/stop', {}).then(() => {
+      syncBroadcastFromServer();
+    }).catch((err) => {
+      console.warn('[LiveBroadcast] Backend stop sync failed:', err.message);
+    });
   } catch (e) {}
 
   return newRecorded;
@@ -181,6 +209,9 @@ export function deleteRecordedSession(id) {
     window.dispatchEvent(new CustomEvent(BROADCAST_EVENT, { 
       detail: { type: 'deleted', deletedId: id } 
     }));
+    apiClient.del(`/live/${id}`).catch((err) => {
+      console.warn('[LiveBroadcast] Backend delete failed:', err.message);
+    });
   } catch (e) {}
   return updated;
 }
@@ -205,6 +236,32 @@ export function getSelectedDebate() {
   }
 }
 
+export async function syncBroadcastFromServer() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await apiClient.get('/live');
+    if (res?.success) {
+      if (res.activeBroadcast) {
+        localStorage.setItem(NOW9_ACTIVE_BROADCAST_KEY, JSON.stringify(res.activeBroadcast));
+      }
+      if (Array.isArray(res.recordedSessions) && res.recordedSessions.length > 0) {
+        localStorage.setItem(NOW9_RECORDED_BROADCASTS_KEY, JSON.stringify(res.recordedSessions));
+      }
+      window.dispatchEvent(new CustomEvent(BROADCAST_EVENT, {
+        detail: {
+          type: 'synced',
+          activeBroadcast: getActiveBroadcast(),
+          recordedSessions: getRecordedSessions()
+        }
+      }));
+      return res;
+    }
+  } catch (err) {
+    console.warn('[LiveBroadcast] Server sync failed:', err.message);
+  }
+  return null;
+}
+
 export function subscribeBroadcast(callback) {
   if (typeof window === 'undefined') return () => {};
 
@@ -217,6 +274,10 @@ export function subscribeBroadcast(callback) {
 
   window.addEventListener(BROADCAST_EVENT, handler);
   window.addEventListener('storage', handler);
+
+  // Initial sync from PostgreSQL + 10s polling for real-time updates across devices
+  syncBroadcastFromServer();
+  const pollTimer = setInterval(syncBroadcastFromServer, 10000);
 
   // Cross-device cloud sync: update automatically when admin goes live on another device
   const unsubCloud = subscribeCloudEvents((data) => {
@@ -240,6 +301,7 @@ export function subscribeBroadcast(callback) {
   });
 
   return () => {
+    clearInterval(pollTimer);
     window.removeEventListener(BROADCAST_EVENT, handler);
     window.removeEventListener('storage', handler);
     if (unsubCloud) unsubCloud();

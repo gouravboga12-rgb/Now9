@@ -1,5 +1,6 @@
 // Central News Store for NowNine
-// Synchronizes Admin News Publisher <-> Citizen Mobile News Feed & Flash Tickers
+// Synchronizes Admin News Publisher <-> PostgreSQL Backend <-> Citizen Mobile News Feed
+import { apiClient } from '../api/apiClient';
 
 export const NEWS_STORAGE_KEY = 'now9_published_news_v1';
 export const NEWS_EVENT = 'now9_news_updated';
@@ -118,6 +119,20 @@ export function publishNewsItem({ title, category = 'Mahabubnagar', summary = ''
   try {
     localStorage.setItem(NEWS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(NEWS_EVENT, { detail: { type: 'added', item: newItem, list: updated } }));
+    
+    // Persist to PostgreSQL backend
+    apiClient.post('/news', {
+      title: newItem.title,
+      category: newItem.category,
+      summary: newItem.summary,
+      district: newItem.category,
+      state: 'Telangana',
+      weight: newItem.tag === 'Breaking' ? 95 : 60,
+      is_breaking: newItem.tag === 'Breaking',
+      thumbnail_url: newItem.img,
+      tag: newItem.tag,
+      source: newItem.source
+    }).catch(err => console.warn('[NewsStore] Server publish failed, local saved:', err.message));
   } catch (e) {}
 
   return newItem;
@@ -130,8 +145,37 @@ export function deleteNewsItem(id) {
   try {
     localStorage.setItem(NEWS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(NEWS_EVENT, { detail: { type: 'deleted', id, list: updated } }));
+    apiClient.del(`/news/${id}`).catch(err => console.warn('[NewsStore] Server delete failed:', err.message));
   } catch (e) {}
   return updated;
+}
+
+export async function syncNewsFromServer() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await apiClient.get('/news');
+    if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
+      const serverNews = res.data.map(item => ({
+        id: item.id,
+        tag: item.tag || (item.is_breaking ? 'Breaking' : item.category || 'News'),
+        tagColor: item.is_breaking ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-amber-500/20 text-amber-300 border-amber-400/30',
+        title: item.title,
+        summary: item.summary || item.content || '',
+        time: item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Recently',
+        reads: `${item.views || 1}K readers`,
+        category: item.category || 'Telangana',
+        source: item.source || 'NowNine Live Wire',
+        img: item.thumbnail_url || '/assets/news_debate_studio.jpg',
+        isLive: true
+      }));
+      localStorage.setItem(NEWS_STORAGE_KEY, JSON.stringify(serverNews));
+      window.dispatchEvent(new CustomEvent(NEWS_EVENT, { detail: { type: 'synced', list: serverNews } }));
+      return serverNews;
+    }
+  } catch (e) {
+    console.warn('[NewsStore] Server sync failed:', e.message);
+  }
+  return null;
 }
 
 export function subscribeNews(callback) {
@@ -141,6 +185,10 @@ export function subscribeNews(callback) {
   };
   window.addEventListener(NEWS_EVENT, handler);
   window.addEventListener('storage', handler);
+
+  // Background sync from PostgreSQL
+  syncNewsFromServer();
+
   return () => {
     window.removeEventListener(NEWS_EVENT, handler);
     window.removeEventListener('storage', handler);

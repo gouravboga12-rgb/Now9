@@ -1,6 +1,7 @@
 // Central Store for Boss of House / Bigg Boss Telugu Housemates
-// Connects Admin Housemates Manager <-> Citizen Mobile Voting & Contestant Roster
+// Connects Admin Housemates Manager <-> EC2 PostgreSQL Backend <-> Citizen Mobile Voting & Contestant Roster
 import { recordCustomerActivity } from './customerActivityStore';
+import { apiClient } from '../api/apiClient';
 
 export const BOSS_STORAGE_KEY = 'now9_boss_housemates_v1';
 export const BOSS_EVENT = 'now9_boss_housemates_updated';
@@ -59,6 +60,12 @@ export function addHousemate({ name, teluguName = '', role = 'Contestant', statu
     window.dispatchEvent(new CustomEvent(BOSS_EVENT, { detail: { type: 'added', item: newHousemate, list: updated } }));
   } catch (e) {}
 
+  apiClient.post('/boss/contestants', newHousemate).then(() => {
+    syncBossFromServer();
+  }).catch((err) => {
+    console.warn('[BossStore] Backend add failed:', err.message);
+  });
+
   return newHousemate;
 }
 
@@ -78,6 +85,8 @@ export function updateHousemate(id, updates) {
     localStorage.setItem(BOSS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(BOSS_EVENT, { detail: { type: 'updated', id, list: updated } }));
   } catch (e) {}
+
+  apiClient.put(`/boss/contestants/${id}`, updates).catch(() => {});
   return updated;
 }
 
@@ -90,6 +99,8 @@ export function deleteHousemate(id) {
     localStorage.setItem(BOSS_STORAGE_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(BOSS_EVENT, { detail: { type: 'deleted', id, list: updated } }));
   } catch (e) {}
+
+  apiClient.del(`/boss/contestants/${id}`).catch(() => {});
   return updated;
 }
 
@@ -101,6 +112,8 @@ export function resetHousemateVotes() {
     localStorage.setItem(BOSS_STORAGE_KEY, JSON.stringify(resetList));
     window.dispatchEvent(new CustomEvent(BOSS_EVENT, { detail: { type: 'reset', list: resetList } }));
   } catch (e) {}
+
+  apiClient.post('/boss/reset', {}).catch(() => {});
   return resetList;
 }
 
@@ -132,7 +145,29 @@ export function voteForHousemate(id) {
       });
     }
   } catch (e) {}
+
+  apiClient.post('/boss/vote', { contestantId: id }).then(() => {
+    syncBossFromServer();
+  }).catch((err) => {
+    console.warn('[BossStore] Backend vote sync failed:', err.message);
+  });
+
   return updated;
+}
+
+export async function syncBossFromServer() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await apiClient.get('/boss/contestants');
+    if (res?.success && Array.isArray(res.contestants) && res.contestants.length > 0) {
+      localStorage.setItem(BOSS_STORAGE_KEY, JSON.stringify(res.contestants));
+      window.dispatchEvent(new CustomEvent(BOSS_EVENT, { detail: { type: 'synced', list: res.contestants } }));
+      return res.contestants;
+    }
+  } catch (err) {
+    console.warn('[BossStore] Server sync failed:', err.message);
+  }
+  return null;
 }
 
 export function subscribeHousemates(callback) {
@@ -142,7 +177,10 @@ export function subscribeHousemates(callback) {
   };
   window.addEventListener(BOSS_EVENT, handler);
   window.addEventListener('storage', handler);
+  syncBossFromServer();
+  const pollTimer = setInterval(syncBossFromServer, 12000);
   return () => {
+    clearInterval(pollTimer);
     window.removeEventListener(BOSS_EVENT, handler);
     window.removeEventListener('storage', handler);
   };
